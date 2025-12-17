@@ -1,0 +1,167 @@
+
+export interface ModelSelectionResult {
+    model: string;
+    supportsCaching: boolean;
+}
+
+export interface ConfigurationPrompts {
+    configName: string;
+    enableCaching?: boolean;
+    setAsDefault: boolean;
+}
+
+export interface ApiKeyResult {
+    apiKey: string;
+    isNew: boolean;
+}
+
+/**
+ * Clean LLM types with single responsibility
+ * No agent or orchestration concerns
+ */
+
+import { NDKAgent } from "@/events";
+import { NDKKind, NDKProject, NDKTask } from "@nostr-dev-kit/ndk";
+import type {
+    LlmCompletionOpts,
+    Message as LlmMessage,
+    LlmResponse,
+    LlmTool,
+    LlmToolCall,
+} from "multi-llm-ts";
+
+// Re-export multi-llm-ts types directly
+export type Message = LlmMessage;
+export type CompletionResponse = LlmResponse;
+export type ToolDefinition = LlmTool;
+export type ToolCall = LlmToolCall;
+
+// Extended completion options with routing context
+export interface CompletionOptions extends LlmCompletionOpts {
+    configName?: string;
+    agentName?: string;
+}
+
+// Model information that can be passed along with responses
+export interface ModelInfo {
+    contextWindow?: number;
+    maxCompletionTokens?: number;
+}
+
+// Import and re-export tool types
+import type { Tool, ExecutionContext } from "@/tools/types";
+export type { Tool, ExecutionContext };
+
+// Simplified completion request that uses multi-llm-ts types
+export interface CompletionRequest {
+    messages: Message[];
+    options?: CompletionOptions;
+    tools?: Tool[];
+    toolContext?: ExecutionContext;
+}
+
+// Streaming types
+export type StreamEvent =
+    | { type: "content"; content: string }
+    | { type: "tool_start"; tool: string; args: Record<string, unknown> }
+    | { type: "tool_complete"; tool: string; result: unknown }
+    | { type: "error"; error: string }
+    | { type: "done"; response: CompletionResponse };
+
+/**
+ * Pure LLM service interface - single responsibility
+ */
+export interface LLMService {
+    complete(request: CompletionRequest): Promise<CompletionResponse>;
+    stream(request: CompletionRequest): AsyncIterable<StreamEvent>;
+}
+
+/**
+ * LLM Model Configuration - matches what's stored on disk in TenexLLMs.configurations
+ * Does NOT include credentials (apiKey, baseUrl) which are stored separately
+ */
+export interface LLMModelConfig {
+    provider: LLMProvider;
+    model: string;
+    enableCaching?: boolean;
+    temperature?: number;
+    maxTokens?: number;
+}
+
+/**
+ * Resolved LLM Configuration - includes credentials for runtime use
+ * This is what the LLM service actually needs to make API calls
+ */
+export interface ResolvedLLMConfig extends LLMModelConfig {
+    apiKey?: string;
+    baseUrl?: string;
+    headers?: Record<string, string>;
+}
+
+/**
+ * Named LLM configuration for UI display and management
+ */
+export interface LLMConfigWithName extends ResolvedLLMConfig {
+    name: string;
+}
+
+
+/**
+ * LLM Provider types
+ */
+export const LLM_PROVIDERS = [
+    "openai",
+    "openrouter",
+    "anthropic",
+    "google",
+    "groq",
+    "deepseek",
+    "ollama",
+    "mistral",
+] as const;
+
+export type LLMProvider = (typeof LLM_PROVIDERS)[number];
+
+/**
+ * Event kinds used in the TENEX system
+ */
+export const EVENT_KINDS = {
+    METADATA: 0,
+    NEW_CONVERSATION: 11,
+    GENERIC_REPLY: NDKKind.GenericReply,
+    PROJECT: NDKProject.kind,
+    AGENT_CONFIG: NDKAgent.kind,
+    TASK: NDKTask.kind,
+    PROJECT_STATUS: 24010,
+    AGENT_REQUEST: 4133,
+    TYPING_INDICATOR: 24111,
+    TYPING_INDICATOR_STOP: 24112,
+    STREAMING_RESPONSE: 21111,
+    TENEX_LOG: 24015,
+    LLM_CONFIG_CHANGE: 24020,
+} as const;
+
+/**
+ * LLM configurations collection - resolved configs with credentials
+ */
+export type LLMConfigs = Record<string, ResolvedLLMConfig>;
+
+/**
+ * LLM Preset configuration
+ */
+export interface LLMPreset {
+    provider: LLMProvider;
+    model: string;
+    enableCaching?: boolean;
+    temperature?: number;
+    maxTokens?: number;
+}
+
+/**
+ * Provider authentication
+ */
+export interface ProviderAuth {
+    apiKey?: string;
+    baseUrl?: string;
+    headers?: Record<string, string>;
+}
