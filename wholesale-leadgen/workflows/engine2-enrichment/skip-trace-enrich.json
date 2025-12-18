@@ -1,0 +1,433 @@
+{
+  "name": "Skip Trace & Enrich Lead",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "event": "newOrUpdatedRow",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "triggerField": "Status",
+        "additionalOptions": {
+          "viewId": {
+            "__rl": true,
+            "value": "New Leads",
+            "mode": "list"
+          }
+        }
+      },
+      "id": "airtable-trigger",
+      "name": "New Lead Trigger",
+      "type": "n8n-nodes-base.airtableTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      },
+      "notes": "Triggers when a new lead is created with Status='New'"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "id": "={{ $json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "Enriching"
+          }
+        }
+      },
+      "id": "set-enriching",
+      "name": "Set Status: Enriching",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [460, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse address into components for skip tracing\n\nconst lead = $input.first().json;\nconst address = lead.fields?.Address || lead.Address || '';\n\n// Try to parse address into components\n// Format expected: \"123 Main St, Austin, TX 78701\" or similar\nconst parts = address.split(',').map(p => p.trim());\n\nlet streetAddress = '';\nlet city = '';\nlet state = '';\nlet zip = '';\n\nif (parts.length >= 1) {\n  streetAddress = parts[0];\n}\n\nif (parts.length >= 2) {\n  city = parts[1];\n}\n\nif (parts.length >= 3) {\n  // State and ZIP might be together like \"TX 78701\"\n  const stateZip = parts[2].split(' ').filter(p => p);\n  if (stateZip.length >= 1) state = stateZip[0];\n  if (stateZip.length >= 2) zip = stateZip[1];\n}\n\n// If we couldn't parse well, use defaults\nif (!city) city = 'Austin'; // Change to your default city\nif (!state) state = 'TX'; // Change to your default state\n\nreturn [{\n  json: {\n    ...lead,\n    parsedAddress: {\n      street: streetAddress,\n      city: city,\n      state: state,\n      zip: zip,\n      full: address\n    }\n  }\n}];"
+      },
+      "id": "parse-address",
+      "name": "Parse Address Components",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.batchskiptracing.com/api/v1/skip-trace",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"address\": \"{{ $json.parsedAddress.street }}\",\n  \"city\": \"{{ $json.parsedAddress.city }}\",\n  \"state\": \"{{ $json.parsedAddress.state }}\",\n  \"zip\": \"{{ $json.parsedAddress.zip }}\"\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "skip-trace",
+      "name": "Skip Trace API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "skiptracing-auth",
+          "name": "BatchSkipTracing API"
+        }
+      },
+      "notes": "Replace with your skip tracing service. Options: BatchSkipTracing, BeenVerified, PropStream API"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.zillow.com/search/GetSearchPageState.htm",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "searchQueryState",
+              "value": "={{ JSON.stringify({\"pagination\":{},\"usersSearchTerm\":$json.parsedAddress.full,\"filterState\":{},\"isListVisible\":true}) }}"
+            },
+            {
+              "name": "wants",
+              "value": "{\"cat1\":[\"mapResults\"]}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "zillow-valuation",
+      "name": "Get Zillow Valuation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 400],
+      "notes": "May need proxy service for production use"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine skip trace and valuation data\n\nconst lead = $('Parse Address Components').item.json;\nconst skipTraceResult = $('Skip Trace API').item.json;\nconst zillowResult = $('Get Zillow Valuation').item.json;\n\n// Parse skip trace response (structure varies by provider)\nlet ownerName = '';\nlet phones = [];\nlet emails = [];\n\ntry {\n  // BatchSkipTracing typical response structure\n  const data = skipTraceResult.data || skipTraceResult;\n  ownerName = data.owner_name || data.ownerName || '';\n  phones = data.phones || data.phone_numbers || [];\n  emails = data.emails || data.email_addresses || [];\n  \n  // Normalize phone format\n  if (typeof phones === 'string') phones = [phones];\n  if (typeof emails === 'string') emails = [emails];\n} catch (e) {\n  console.log('Skip trace parse error:', e);\n}\n\n// Parse Zillow valuation\nlet zestimate = null;\nlet propertyDetails = {};\n\ntry {\n  const results = zillowResult.cat1?.searchResults?.mapResults || [];\n  if (results.length > 0) {\n    const prop = results[0];\n    zestimate = prop.zestimate || prop.price;\n    propertyDetails = {\n      beds: prop.beds,\n      baths: prop.baths,\n      sqft: prop.livingArea || prop.area,\n      yearBuilt: prop.yearBuilt,\n      lotSize: prop.lotSize,\n      homeType: prop.homeType\n    };\n  }\n} catch (e) {\n  console.log('Zillow parse error:', e);\n}\n\nreturn [{\n  json: {\n    leadId: lead.id,\n    address: lead.parsedAddress.full,\n    originalData: lead,\n    enrichment: {\n      ownerName: ownerName,\n      phones: phones.slice(0, 3), // Top 3 phones\n      emails: emails.slice(0, 2), // Top 2 emails\n      primaryPhone: phones[0] || null,\n      primaryEmail: emails[0] || null\n    },\n    valuation: {\n      zestimate: zestimate,\n      ...propertyDetails\n    },\n    askingPrice: lead.fields?.['Asking Price'] || lead['Asking Price'],\n    equity: zestimate && lead.fields?.['Asking Price'] ? \n      zestimate - lead.fields['Asking Price'] : null\n  }\n}];"
+      },
+      "id": "combine-enrichment",
+      "name": "Combine Enrichment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "HTTP-Referer",
+              "value": "https://wholesale-leadgen.local"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"anthropic/claude-3.5-sonnet\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyze this property for wholesale real estate deal potential:\\n\\nProperty Details:\\n- Address: {{ $json.address }}\\n- Asking Price: ${{ $json.askingPrice }}\\n- Estimated Value (Zestimate): ${{ $json.valuation.zestimate || 'Unknown' }}\\n- Beds/Baths: {{ $json.valuation.beds || '?' }}/{{ $json.valuation.baths || '?' }}\\n- Square Feet: {{ $json.valuation.sqft || 'Unknown' }}\\n- Year Built: {{ $json.valuation.yearBuilt || 'Unknown' }}\\n- Property Type: {{ $json.valuation.homeType || 'Unknown' }}\\n\\nOwner Info:\\n- Name: {{ $json.enrichment.ownerName || 'Unknown' }}\\n- Phone: {{ $json.enrichment.primaryPhone || 'Not found' }}\\n- Email: {{ $json.enrichment.primaryEmail || 'Not found' }}\\n\\nSource: {{ $json.originalData.fields?.Source || $json.originalData.Source || 'Unknown' }}\\nDescription: {{ $json.originalData.fields?.Description || $json.originalData.Description || 'No description' }}\\n\\nAnalyze for wholesale potential:\\n1. Is the asking price below market value? By how much?\\n2. What's the potential wholesale margin?\\n3. What repair/rehab costs might be needed?\\n4. What's the estimated ARV (After Repair Value)?\\n5. What exit strategy makes sense? (wholesale, fix-flip, rental)\\n6. What motivation signals do you see?\\n7. Rate overall deal score (0-100)\\n8. What questions should we ask the seller?\\n\\nReturn ONLY valid JSON:\\n{\\n  \\\"deal_score\\\": 0-100,\\n  \\\"wholesale_margin_estimate\\\": number_or_null,\\n  \\\"below_market_percent\\\": number_or_null,\\n  \\\"estimated_arv\\\": number_or_null,\\n  \\\"estimated_repairs\\\": number_or_null,\\n  \\\"exit_strategy\\\": \\\"wholesale|fix-flip|rental|hold\\\",\\n  \\\"motivation_signals\\\": [\\\"list\\\"],\\n  \\\"red_flags\\\": [\\\"list\\\"],\\n  \\\"questions_to_ask\\\": [\\\"list\\\"],\\n  \\\"summary\\\": \\\"2-3 sentence summary\\\",\\n  \\\"priority\\\": \\\"high|medium|low\\\"\\n}\"\n    }\n  ],\n  \"max_tokens\": 800,\n  \"temperature\": 0.3\n}",
+        "options": {}
+      },
+      "id": "ai-analysis",
+      "name": "AI Deal Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openrouter-auth",
+          "name": "OpenRouter API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI analysis and prepare final enrichment data\n\nconst enrichment = $('Combine Enrichment Data').item.json;\nconst aiResponse = $input.first().json;\n\nlet analysis = {};\ntry {\n  const content = aiResponse.choices[0].message.content;\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    analysis = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {\n  analysis = {\n    deal_score: 50,\n    wholesale_margin_estimate: null,\n    below_market_percent: null,\n    estimated_arv: null,\n    estimated_repairs: null,\n    exit_strategy: 'wholesale',\n    motivation_signals: [],\n    red_flags: ['AI analysis failed'],\n    questions_to_ask: ['What is your timeline for selling?', 'Are you open to creative financing?'],\n    summary: 'Analysis could not be completed. Manual review recommended.',\n    priority: 'medium'\n  };\n}\n\nreturn [{\n  json: {\n    leadId: enrichment.leadId,\n    updateFields: {\n      'Owner Name': enrichment.enrichment.ownerName,\n      'Owner Phone': enrichment.enrichment.primaryPhone,\n      'Owner Email': enrichment.enrichment.primaryEmail,\n      'All Phones': enrichment.enrichment.phones.join(', '),\n      'Estimated Value': enrichment.valuation.zestimate,\n      'Beds': enrichment.valuation.beds,\n      'Baths': enrichment.valuation.baths,\n      'Sqft': enrichment.valuation.sqft,\n      'Year Built': enrichment.valuation.yearBuilt,\n      'AI Score': analysis.deal_score,\n      'AI Analysis': JSON.stringify(analysis, null, 2),\n      'Priority': analysis.priority,\n      'Exit Strategy': analysis.exit_strategy,\n      'Estimated ARV': analysis.estimated_arv,\n      'Estimated Repairs': analysis.estimated_repairs,\n      'Status': enrichment.enrichment.primaryPhone || enrichment.enrichment.primaryEmail ? 'Ready' : 'No Contact Info'\n    },\n    analysis: analysis\n  }\n}];"
+      },
+      "id": "prepare-update",
+      "name": "Prepare Airtable Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "id": "={{ $json.leadId }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Owner Name": "={{ $json.updateFields['Owner Name'] }}",
+            "Owner Phone": "={{ $json.updateFields['Owner Phone'] }}",
+            "Owner Email": "={{ $json.updateFields['Owner Email'] }}",
+            "Estimated Value": "={{ $json.updateFields['Estimated Value'] }}",
+            "AI Score": "={{ $json.updateFields['AI Score'] }}",
+            "AI Analysis": "={{ $json.updateFields['AI Analysis'] }}",
+            "Priority": "={{ $json.updateFields['Priority'] }}",
+            "Status": "={{ $json.updateFields['Status'] }}"
+          }
+        }
+      },
+      "id": "update-airtable",
+      "name": "Update Lead in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1780, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "high-score",
+              "leftValue": "={{ $json.analysis.deal_score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-high-score",
+      "name": "High Score Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#hot-leads",
+        "text": "=:fire: HIGH POTENTIAL LEAD FOUND!\n\n*Address:* {{ $('Combine Enrichment Data').item.json.address }}\n*Asking:* ${{ $('Combine Enrichment Data').item.json.askingPrice?.toLocaleString() }}\n*Estimated Value:* ${{ $('Combine Enrichment Data').item.json.valuation.zestimate?.toLocaleString() }}\n*Deal Score:* {{ $json.analysis.deal_score }}/100\n*Priority:* {{ $json.analysis.priority }}\n\n*Summary:* {{ $json.analysis.summary }}\n\n*Contact:*\n:phone: {{ $('Combine Enrichment Data').item.json.enrichment.primaryPhone || 'No phone' }}\n:email: {{ $('Combine Enrichment Data').item.json.enrichment.primaryEmail || 'No email' }}\n\n*Exit Strategy:* {{ $json.analysis.exit_strategy }}",
+        "otherOptions": {}
+      },
+      "id": "slack-hot-lead",
+      "name": "Slack Alert: Hot Lead",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2220, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-creds",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-op-normal",
+      "name": "Normal Priority",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2220, 400]
+    }
+  ],
+  "connections": {
+    "New Lead Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Status: Enriching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Status: Enriching": {
+      "main": [
+        [
+          {
+            "node": "Parse Address Components",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Address Components": {
+      "main": [
+        [
+          {
+            "node": "Skip Trace API",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Zillow Valuation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Trace API": {
+      "main": [
+        [
+          {
+            "node": "Combine Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Zillow Valuation": {
+      "main": [
+        [
+          {
+            "node": "Combine Enrichment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Enrichment Data": {
+      "main": [
+        [
+          {
+            "node": "AI Deal Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Deal Analysis": {
+      "main": [
+        [
+          {
+            "node": "Prepare Airtable Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Airtable Update": {
+      "main": [
+        [
+          {
+            "node": "Update Lead in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead in Airtable": {
+      "main": [
+        [
+          {
+            "node": "High Score Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Score Lead?": {
+      "main": [
+        [
+          {
+            "node": "Slack Alert: Hot Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normal Priority",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "wholesale-leadgen",
+      "id": "1"
+    },
+    {
+      "name": "engine2-enrichment",
+      "id": "3"
+    }
+  ],
+  "pinData": {},
+  "meta": {
+    "instanceId": "wholesale-leadgen-system"
+  }
+}

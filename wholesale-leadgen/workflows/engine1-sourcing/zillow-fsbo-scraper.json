@@ -1,0 +1,274 @@
+{
+  "name": "Zillow FSBO Scraper",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24,
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 8 AM Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.zillow.com/homes/fsbo/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "searchQueryState",
+              "value": "={{JSON.stringify({\"pagination\":{},\"mapBounds\":{\"west\":-97.9431,\"east\":-97.5614,\"south\":30.1136,\"north\":30.5083},\"isMapVisible\":true,\"filterState\":{\"fsbo\":{\"value\":true},\"cmsn\":{\"value\":false},\"auc\":{\"value\":false},\"fore\":{\"value\":false}},\"isListVisible\":true})}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "http-zillow",
+      "name": "Fetch Zillow FSBO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "notes": "Adjust mapBounds for your target market. Consider using ScraperAPI or BrightData proxy for production."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Zillow HTML response to extract property listings\n// NOTE: Zillow blocks scrapers - use proxy service in production\n\nconst html = $input.first().json.data || $input.first().json.body || '';\nconst listings = [];\n\n// Regex patterns to extract property data from Zillow HTML\n// These patterns may need adjustment as Zillow updates their site\nconst addressPattern = /\"streetAddress\":\"([^\"]+)\"/g;\nconst pricePattern = /\"price\":(\\d+)/g;\nconst zpidPattern = /\"zpid\":\"(\\d+)\"/g;\nconst detailUrlPattern = /\"detailUrl\":\"([^\"]+)\"/g;\n\nlet addressMatch, priceMatch, zpidMatch, urlMatch;\nconst addresses = [];\nconst prices = [];\nconst zpids = [];\nconst urls = [];\n\nwhile ((addressMatch = addressPattern.exec(html)) !== null) {\n  addresses.push(addressMatch[1]);\n}\nwhile ((priceMatch = pricePattern.exec(html)) !== null) {\n  prices.push(parseInt(priceMatch[1]));\n}\nwhile ((zpidMatch = zpidPattern.exec(html)) !== null) {\n  zpids.push(zpidMatch[1]);\n}\nwhile ((urlMatch = detailUrlPattern.exec(html)) !== null) {\n  urls.push(urlMatch[1]);\n}\n\n// Combine into listing objects\nfor (let i = 0; i < Math.min(addresses.length, prices.length, zpids.length); i++) {\n  listings.push({\n    address: addresses[i],\n    price: prices[i],\n    zpid: zpids[i],\n    url: urls[i] ? `https://www.zillow.com${urls[i]}` : null,\n    source: 'Zillow FSBO',\n    dateFound: new Date().toISOString(),\n    status: 'New'\n  });\n}\n\nreturn listings.map(l => ({ json: l }));"
+      },
+      "id": "parse-listings",
+      "name": "Parse Property Listings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "filterByFormula": "={Address}='{{ $json.address }}'"
+      },
+      "id": "check-duplicate",
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [900, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-empty",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-not-exists",
+      "name": "If Not Already In DB",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Address": "={{ $('Parse Property Listings').item.json.address }}",
+            "Source": "Zillow FSBO",
+            "Status": "New",
+            "Asking Price": "={{ $('Parse Property Listings').item.json.price }}",
+            "Listing URL": "={{ $('Parse Property Listings').item.json.url }}",
+            "Date Found": "={{ $('Parse Property Listings').item.json.dateFound }}",
+            "Raw Data": "={{ JSON.stringify($('Parse Property Listings').item.json) }}"
+          }
+        }
+      },
+      "id": "create-lead",
+      "name": "Create Lead in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1340, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#leads",
+        "text": "=:house: New FSBO Lead Found!\n\n*Address:* {{ $('Parse Property Listings').item.json.address }}\n*Price:* ${{ $('Parse Property Listings').item.json.price.toLocaleString() }}\n*Source:* Zillow FSBO\n\n<{{ $('Parse Property Listings').item.json.url }}|View on Zillow>",
+        "otherOptions": {}
+      },
+      "id": "slack-notify",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1560, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-creds",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-op",
+      "name": "Already Exists - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1340, 400]
+    }
+  ],
+  "connections": {
+    "Daily 8 AM Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Zillow FSBO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Zillow FSBO": {
+      "main": [
+        [
+          {
+            "node": "Parse Property Listings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Property Listings": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate": {
+      "main": [
+        [
+          {
+            "node": "If Not Already In DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Not Already In DB": {
+      "main": [
+        [
+          {
+            "node": "Create Lead in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Already Exists - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Lead in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "wholesale-leadgen",
+      "id": "1"
+    },
+    {
+      "name": "engine1-sourcing",
+      "id": "2"
+    }
+  ],
+  "pinData": {},
+  "meta": {
+    "instanceId": "wholesale-leadgen-system"
+  }
+}

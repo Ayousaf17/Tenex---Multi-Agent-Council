@@ -1,0 +1,509 @@
+{
+  "name": "Email Response Monitor & Qualification",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "includeSpamTrash": false,
+          "readStatus": "unread"
+        },
+        "options": {}
+      },
+      "id": "gmail-trigger",
+      "name": "New Email Received",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth",
+          "name": "Gmail OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract sender email and clean it\n\nconst email = $input.first().json;\nlet senderEmail = '';\n\n// Gmail can return sender in different formats\nconst from = email.from || email.payload?.headers?.find(h => h.name === 'From')?.value || '';\n\n// Extract email from formats like \"John Doe <john@example.com>\"\nconst emailMatch = from.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/);\nif (emailMatch) {\n  senderEmail = emailMatch[0].toLowerCase();\n}\n\nreturn [{\n  json: {\n    ...email,\n    senderEmail: senderEmail,\n    subject: email.subject || '',\n    body: email.snippet || email.text || '',\n    fullBody: email.text || email.snippet || '',\n    receivedDate: email.date || new Date().toISOString()\n  }\n}];"
+      },
+      "id": "extract-sender",
+      "name": "Extract Sender Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "filterByFormula": "=LOWER({Owner Email})='{{ $json.senderEmail }}'"
+      },
+      "id": "find-lead",
+      "name": "Find Lead by Email",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [680, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "found-lead",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "lead-exists",
+      "name": "Lead Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine email data with lead data\n\nconst emailData = $('Extract Sender Email').item.json;\nconst leads = $input.first().json;\nconst lead = Array.isArray(leads) ? leads[0] : leads;\n\n// Get previous conversations context\nconst previousEmails = lead.fields?.['Last Email Subject'] || 'Initial outreach';\n\nreturn [{\n  json: {\n    leadId: lead.id,\n    leadFields: lead.fields,\n    email: {\n      from: emailData.senderEmail,\n      subject: emailData.subject,\n      body: emailData.fullBody,\n      snippet: emailData.body,\n      date: emailData.receivedDate\n    },\n    context: {\n      address: lead.fields?.Address,\n      askingPrice: lead.fields?.['Asking Price'],\n      aiScore: lead.fields?.['AI Score'],\n      previousOutreach: previousEmails,\n      emailsSent: lead.fields?.['Emails Sent'] || 1\n    }\n  }\n}];"
+      },
+      "id": "combine-data",
+      "name": "Combine Email + Lead Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "HTTP-Referer",
+              "value": "https://wholesale-leadgen.local"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"anthropic/claude-3.5-sonnet\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert at analyzing seller responses for wholesale real estate deals. Your job is to determine seller motivation, qualify leads, and recommend next actions. Be accurate and conservative in your assessments - only mark as HOT if there are clear buying signals.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyze this seller's email response:\\n\\nContext:\\n- Property: {{ $json.context.address }}\\n- Asking Price: ${{ $json.context.askingPrice }}\\n- Our previous outreach: {{ $json.context.previousOutreach }}\\n- Number of emails we've sent: {{ $json.context.emailsSent }}\\n\\nTheir Response:\\nSubject: {{ $json.email.subject }}\\nBody: {{ $json.email.body }}\\n\\nDetermine:\\n1. Interest Level: COLD (not interested/hostile), WARM (curious/open to talking), HOT (ready to discuss seriously/motivated)\\n2. Key Information Provided (price expectations, timeline, motivation, etc.)\\n3. Motivation Signals (urgency, financial stress, life changes, etc.)\\n4. Objections or Concerns raised\\n5. Recommended Next Action\\n6. Suggested Response (if WARM or HOT)\\n\\nReturn ONLY valid JSON:\\n{\\n  \\\"interest_level\\\": \\\"COLD|WARM|HOT\\\",\\n  \\\"motivation_score\\\": 0-100,\\n  \\\"sentiment\\\": \\\"positive|neutral|negative\\\",\\n  \\\"key_info_extracted\\\": {\\n    \\\"price_expectation\\\": \\\"text or null\\\",\\n    \\\"timeline\\\": \\\"text or null\\\",\\n    \\\"reason_for_selling\\\": \\\"text or null\\\",\\n    \\\"mortgage_status\\\": \\\"text or null\\\",\\n    \\\"creative_finance_openness\\\": \\\"yes|no|maybe|unknown\\\"\\n  },\\n  \\\"motivation_signals\\\": [\\\"list of signals\\\"],\\n  \\\"objections\\\": [\\\"list of objections\\\"],\\n  \\\"red_flags\\\": [\\\"list of concerns\\\"],\\n  \\\"next_action\\\": \\\"specific action to take\\\",\\n  \\\"suggested_response\\\": \\\"email response text if WARM/HOT, null if COLD\\\",\\n  \\\"call_readiness\\\": \\\"ready_now|needs_nurturing|not_ready\\\",\\n  \\\"summary\\\": \\\"2-3 sentence summary for quick review\\\"\\n}\"\n    }\n  ],\n  \"max_tokens\": 1000,\n  \"temperature\": 0.3\n}",
+        "options": {}
+      },
+      "id": "analyze-response",
+      "name": "AI Analyze Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openrouter-auth",
+          "name": "OpenRouter API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI analysis and prepare update data\n\nconst combined = $('Combine Email + Lead Data').item.json;\nconst aiResponse = $input.first().json;\n\nlet analysis = {\n  interest_level: 'WARM',\n  motivation_score: 50,\n  sentiment: 'neutral',\n  key_info_extracted: {},\n  motivation_signals: [],\n  objections: [],\n  red_flags: [],\n  next_action: 'Follow up in 2-3 days',\n  suggested_response: null,\n  call_readiness: 'needs_nurturing',\n  summary: 'Response received, analysis pending review'\n};\n\ntry {\n  const content = aiResponse.choices[0].message.content;\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    analysis = { ...analysis, ...JSON.parse(jsonMatch[0]) };\n  }\n} catch (e) {\n  console.log('AI parse error:', e);\n}\n\n// Map interest level to status\nconst statusMap = {\n  'COLD': 'Cold',\n  'WARM': 'Warm',\n  'HOT': 'HOT'\n};\n\nreturn [{\n  json: {\n    leadId: combined.leadId,\n    email: combined.email,\n    context: combined.context,\n    analysis: analysis,\n    newStatus: statusMap[analysis.interest_level] || 'Warm',\n    updateFields: {\n      'Status': statusMap[analysis.interest_level] || 'Warm',\n      'AI Score': analysis.motivation_score,\n      'Response Analysis': JSON.stringify(analysis, null, 2),\n      'Last Response Date': new Date().toISOString(),\n      'Call Readiness': analysis.call_readiness\n    }\n  }\n}];"
+      },
+      "id": "parse-analysis",
+      "name": "Parse Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "id": "={{ $json.leadId }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "={{ $json.updateFields.Status }}",
+            "AI Score": "={{ $json.updateFields['AI Score'] }}",
+            "Response Analysis": "={{ $json.updateFields['Response Analysis'] }}",
+            "Last Response Date": "={{ $json.updateFields['Last Response Date'] }}"
+          }
+        }
+      },
+      "id": "update-lead",
+      "name": "Update Lead",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1780, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Conversations",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead": "[\"={{ $json.leadId }}\"]",
+            "Type": "Email Inbound",
+            "Content": "={{ $json.email.body }}",
+            "Subject": "={{ $json.email.subject }}",
+            "Date": "={{ $json.email.date }}",
+            "Sentiment": "={{ $json.analysis.sentiment }}",
+            "AI Analysis": "={{ JSON.stringify($json.analysis) }}"
+          }
+        }
+      },
+      "id": "log-response",
+      "name": "Log Response",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [2000, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-hot",
+              "leftValue": "={{ $json.analysis.interest_level }}",
+              "rightValue": "HOT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-hot",
+      "name": "Is HOT Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "channel": "#hot-leads",
+        "text": "=:fire::fire::fire: HOT LEAD RESPONSE!\n\n*Property:* {{ $json.context.address }}\n*Asking:* ${{ $json.context.askingPrice?.toLocaleString() }}\n*Motivation Score:* {{ $json.analysis.motivation_score }}/100\n\n*Their Response:*\n> {{ $json.email.snippet }}\n\n*AI Summary:*\n{{ $json.analysis.summary }}\n\n*Key Info:*\n- Timeline: {{ $json.analysis.key_info_extracted.timeline || 'Unknown' }}\n- Reason: {{ $json.analysis.key_info_extracted.reason_for_selling || 'Unknown' }}\n- Creative Finance: {{ $json.analysis.key_info_extracted.creative_finance_openness || 'Unknown' }}\n\n*Call Readiness:* {{ $json.analysis.call_readiness }}\n\n*Suggested Next Step:*\n{{ $json.analysis.next_action }}\n\n*Suggested Response:*\n```{{ $json.analysis.suggested_response || 'Call them directly' }}```",
+        "otherOptions": {}
+      },
+      "id": "slack-hot-alert",
+      "name": "Slack HOT Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2440, 100],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-creds",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-warm",
+              "leftValue": "={{ $json.analysis.interest_level }}",
+              "rightValue": "WARM",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "has-response",
+              "leftValue": "={{ $json.analysis.suggested_response }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-warm-auto-reply",
+      "name": "Warm + Auto Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email.from }}",
+        "subject": "=Re: {{ $json.email.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.analysis.suggested_response + '\\n\\n--\\n[YOUR NAME]\\nLocal Real Estate Investor\\n[YOUR PHONE]' }}",
+        "options": {}
+      },
+      "id": "send-warm-reply",
+      "name": "Auto Reply (Warm)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2660, 200],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth",
+          "name": "Gmail OAuth"
+        }
+      },
+      "notes": "Optional: Auto-reply to warm leads. Disable if you prefer manual responses."
+    },
+    {
+      "parameters": {},
+      "id": "no-auto-reply",
+      "name": "Manual Follow-up Needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2660, 400]
+    },
+    {
+      "parameters": {},
+      "id": "not-a-lead",
+      "name": "Not From Lead - Ignore",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "New Email Received": {
+      "main": [
+        [
+          {
+            "node": "Extract Sender Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Sender Email": {
+      "main": [
+        [
+          {
+            "node": "Find Lead by Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Lead by Email": {
+      "main": [
+        [
+          {
+            "node": "Lead Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Found?": {
+      "main": [
+        [
+          {
+            "node": "Combine Email + Lead Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not From Lead - Ignore",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Email + Lead Data": {
+      "main": [
+        [
+          {
+            "node": "AI Analyze Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Analyze Response": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis": {
+      "main": [
+        [
+          {
+            "node": "Update Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead": {
+      "main": [
+        [
+          {
+            "node": "Log Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Response": {
+      "main": [
+        [
+          {
+            "node": "Is HOT Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is HOT Lead?": {
+      "main": [
+        [
+          {
+            "node": "Slack HOT Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Warm + Auto Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Warm + Auto Reply?": {
+      "main": [
+        [
+          {
+            "node": "Auto Reply (Warm)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Manual Follow-up Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "wholesale-leadgen",
+      "id": "1"
+    },
+    {
+      "name": "engine4-qualification",
+      "id": "5"
+    }
+  ],
+  "pinData": {},
+  "meta": {
+    "instanceId": "wholesale-leadgen-system"
+  }
+}

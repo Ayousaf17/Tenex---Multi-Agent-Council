@@ -1,0 +1,336 @@
+{
+  "name": "Initial Email Outreach",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "event": "newOrUpdatedRow",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "triggerField": "Status",
+        "additionalOptions": {
+          "viewId": {
+            "__rl": true,
+            "value": "Ready for Outreach",
+            "mode": "list"
+          }
+        }
+      },
+      "id": "airtable-trigger",
+      "name": "Lead Ready Trigger",
+      "type": "n8n-nodes-base.airtableTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      },
+      "notes": "Triggers when a lead Status changes to 'Ready'"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-email",
+              "leftValue": "={{ $json.fields['Owner Email'] }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-email",
+      "name": "Has Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "unit": "minutes",
+        "amount": "={{ Math.floor(Math.random() * 120) + 30 }}"
+      },
+      "id": "random-delay",
+      "name": "Random Delay (30-150 min)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [680, 200],
+      "notes": "Adds randomness to appear more human"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "HTTP-Referer",
+              "value": "https://wholesale-leadgen.local"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"anthropic/claude-3.5-sonnet\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an expert real estate investor writing personalized emails to property owners. Your tone is friendly, professional, and NOT salesy. You write conversational emails that get responses. Never use phrases like 'I hope this email finds you well' or generic opener. Be direct but warm.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a personalized email to a property owner:\\n\\nProperty Details:\\n- Address: {{ $('Lead Ready Trigger').item.json.fields.Address }}\\n- Listed Price: ${{ $('Lead Ready Trigger').item.json.fields['Asking Price'] }}\\n- Source: {{ $('Lead Ready Trigger').item.json.fields.Source }}\\n- Property Type: {{ $('Lead Ready Trigger').item.json.fields['Property Type'] || 'Single Family' }}\\n\\nOwner Name: {{ $('Lead Ready Trigger').item.json.fields['Owner Name'] || 'there' }}\\n\\nMy Context:\\n- I'm a local real estate investor\\n- I buy properties for cash and can close quickly\\n- I'm open to creative deals (subject-to, seller financing)\\n- I never lowball - I make fair offers\\n\\nAI Analysis of this property:\\n{{ $('Lead Ready Trigger').item.json.fields['AI Analysis'] || 'No analysis available' }}\\n\\nWrite an email that:\\n1. References the specific property naturally\\n2. Shows I did research (mention something specific)\\n3. Asks if they'd be open to a conversation about their situation\\n4. Is under 100 words\\n5. Ends with a simple yes/no question to prompt response\\n6. Doesn't mention specific dollar amounts or offers\\n\\nReturn ONLY valid JSON:\\n{\\n  \\\"subject\\\": \\\"Subject line (max 6 words, no clickbait)\\\",\\n  \\\"body\\\": \\\"Email body text\\\"\\n}\"\n    }\n  ],\n  \"max_tokens\": 500,\n  \"temperature\": 0.7\n}",
+        "options": {}
+      },
+      "id": "generate-email",
+      "name": "Generate Personalized Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openrouter-auth",
+          "name": "OpenRouter API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the generated email from OpenRouter\n\nconst response = $input.first().json;\nconst lead = $('Lead Ready Trigger').item.json;\n\nlet email = {\n  subject: 'Quick question about your property',\n  body: 'Hi there,\\n\\nI noticed your property and wanted to reach out. I\\'m a local investor who helps homeowners explore their options when they\\'re thinking about selling.\\n\\nWould you be open to a quick conversation about your situation?\\n\\nBest regards'\n};\n\ntry {\n  const content = response.choices[0].message.content;\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[0]);\n    email.subject = parsed.subject || email.subject;\n    email.body = parsed.body || email.body;\n  }\n} catch (e) {\n  console.log('Email parse error, using default:', e);\n}\n\n// Add signature\nconst signature = `\\n\\n--\\n[YOUR NAME]\\nLocal Real Estate Investor\\n[YOUR PHONE]`;\n\nreturn [{\n  json: {\n    leadId: lead.id,\n    toEmail: lead.fields['Owner Email'],\n    toName: lead.fields['Owner Name'] || 'Property Owner',\n    subject: email.subject,\n    body: email.body + signature,\n    address: lead.fields.Address\n  }\n}];"
+      },
+      "id": "parse-email",
+      "name": "Parse Generated Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.toEmail }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Send Email via Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 200],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-oauth",
+          "name": "Gmail OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "id": "={{ $json.leadId }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "Contacted",
+            "Last Contact Date": "={{ new Date().toISOString() }}",
+            "Emails Sent": 1,
+            "Last Email Subject": "={{ $('Parse Generated Email').item.json.subject }}"
+          }
+        }
+      },
+      "id": "update-lead-status",
+      "name": "Update Lead Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1560, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Conversations",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead": "[\"={{ $('Parse Generated Email').item.json.leadId }}\"]",
+            "Type": "Email Outbound",
+            "Content": "={{ $('Parse Generated Email').item.json.body }}",
+            "Subject": "={{ $('Parse Generated Email').item.json.subject }}",
+            "Date": "={{ new Date().toISOString() }}",
+            "Sentiment": "Neutral"
+          }
+        }
+      },
+      "id": "log-conversation",
+      "name": "Log Conversation",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1780, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-email",
+      "name": "No Email - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [680, 400],
+      "notes": "Lead has no email - consider SMS outreach workflow"
+    }
+  ],
+  "connections": {
+    "Lead Ready Trigger": {
+      "main": [
+        [
+          {
+            "node": "Has Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Email?": {
+      "main": [
+        [
+          {
+            "node": "Random Delay (30-150 min)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Email - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Random Delay (30-150 min)": {
+      "main": [
+        [
+          {
+            "node": "Generate Personalized Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Personalized Email": {
+      "main": [
+        [
+          {
+            "node": "Parse Generated Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Generated Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email via Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email via Gmail": {
+      "main": [
+        [
+          {
+            "node": "Update Lead Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Lead Status": {
+      "main": [
+        [
+          {
+            "node": "Log Conversation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "wholesale-leadgen",
+      "id": "1"
+    },
+    {
+      "name": "engine3-outreach",
+      "id": "4"
+    }
+  ],
+  "pinData": {},
+  "meta": {
+    "instanceId": "wholesale-leadgen-system"
+  }
+}
