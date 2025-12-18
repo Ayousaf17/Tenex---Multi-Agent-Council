@@ -1,0 +1,446 @@
+{
+  "name": "Facebook Marketplace Property Scraper (Apify)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "notes": "FB Marketplace updates frequently - check every 6 hours"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/apify~facebook-marketplace-scraper/runs?waitForFinish=300",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"searchQuery\": \"house for sale by owner\",\n  \"location\": \"{{ $env.TARGET_CITY }}, {{ $env.TARGET_STATE }}\",\n  \"maxItems\": 50,\n  \"category\": \"propertyrentals\",\n  \"sortBy\": \"creation_time_descend\",\n  \"proxy\": {\n    \"useApifyProxy\": true\n  }\n}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "apify-run",
+      "name": "Run Apify FB Marketplace Scraper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "apify-auth",
+          "name": "Apify API Token"
+        }
+      },
+      "notes": "Searches FB Marketplace for FSBO properties. Category 'propertyrentals' includes sales."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.apify.com/v2/datasets/{{ $json.data.defaultDatasetId }}/items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "get-results",
+      "name": "Get Scraper Results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "apify-auth",
+          "name": "Apify API Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map FB Marketplace data to our lead schema\n// FB Marketplace data is less structured - need to extract from title/description\n\nconst results = $input.first().json;\nconst items = Array.isArray(results) ? results : [results];\n\nconst leads = items.map(item => {\n  const title = item.title || '';\n  const description = item.description || '';\n  const fullText = `${title} ${description}`;\n  \n  // Extract price from title/description\n  const priceMatch = fullText.match(/\\$([\\d,]+)/)\n  const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, '')) : null;\n  \n  // Extract phone numbers\n  const phonePattern = /(?:\\+?1[-.\\s]?)?\\(?[0-9]{3}\\)?[-.\\s]?[0-9]{3}[-.\\s]?[0-9]{4}/g;\n  const phones = fullText.match(phonePattern) || [];\n  \n  // Extract email\n  const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g;\n  const emails = fullText.match(emailPattern) || [];\n  \n  // Extract bedrooms/bathrooms from common patterns\n  const bedsMatch = fullText.match(/(\\d+)\\s*(?:bed|br|bedroom)/i);\n  const bathsMatch = fullText.match(/(\\d+(?:\\.\\d+)?)\\s*(?:bath|ba|bathroom)/i);\n  \n  // Extract address-like patterns\n  const addressPattern = /\\d+\\s+[A-Za-z]+\\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Boulevard|Ct|Court|Way|Pl|Place)[\\s,]*/gi;\n  const addressMatch = fullText.match(addressPattern);\n  \n  return {\n    json: {\n      address: addressMatch ? addressMatch[0].trim() : `FB Listing - ${title.substring(0, 50)}`,\n      city: item.location?.city || '',\n      state: item.location?.state || '',\n      zip: '',\n      askingPrice: price || item.price || null,\n      bedrooms: bedsMatch ? parseInt(bedsMatch[1]) : null,\n      bathrooms: bathsMatch ? parseFloat(bathsMatch[1]) : null,\n      sqft: null,\n      yearBuilt: null,\n      propertyType: 'Single Family',\n      description: description.substring(0, 500),\n      photos: item.images || item.photos || [],\n      listingUrl: item.url || item.link || '',\n      ownerPhone: phones[0] || null,\n      ownerEmail: emails[0] || null,\n      sellerName: item.seller?.name || null,\n      source: 'FB Marketplace',\n      dateFound: new Date().toISOString(),\n      status: 'New',\n      rawData: JSON.stringify(item)\n    }\n  };\n}).filter(lead => lead.json.askingPrice && lead.json.askingPrice > 50000); // Filter obvious non-properties\n\nreturn leads;"
+      },
+      "id": "map-data",
+      "name": "Map to Lead Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "HTTP-Referer",
+              "value": "https://wholesale-leadgen.local"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"anthropic/claude-3-haiku\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Analyze this Facebook Marketplace listing for legitimacy:\\n\\nTitle: {{ $json.description ? $json.description.substring(0, 200) : 'No description' }}\\nPrice: ${{ $json.askingPrice }}\\nLocation: {{ $json.city }}, {{ $json.state }}\\n\\nDetermine:\\n1. Is this a legitimate property for sale? (not rental, scam, or spam)\\n2. Is the price realistic for a real property?\\n3. Does it appear to be FSBO?\\n\\nReturn ONLY valid JSON:\\n{\\n  \\\"is_legitimate\\\": true/false,\\n  \\\"confidence\\\": 0-100,\\n  \\\"is_fsbo\\\": true/false,\\n  \\\"reasoning\\\": \\\"brief explanation\\\"\\n}\"\n    }\n  ],\n  \"max_tokens\": 200,\n  \"temperature\": 0.2\n}",
+        "options": {}
+      },
+      "id": "ai-legitimacy-check",
+      "name": "AI Legitimacy Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openrouter-auth",
+          "name": "OpenRouter API"
+        }
+      },
+      "notes": "Uses Claude Haiku (fast, cheap) to filter spam/scams"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI legitimacy check and combine with lead data\n\nconst lead = $('Map to Lead Schema').item.json;\nconst aiResponse = $input.first().json;\n\nlet analysis = { is_legitimate: true, confidence: 50, is_fsbo: true };\n\ntry {\n  const content = aiResponse.choices[0].message.content;\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    analysis = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {\n  // If parsing fails, assume legitimate to avoid missing leads\n}\n\nreturn [{\n  json: {\n    ...lead,\n    isLegitimate: analysis.is_legitimate,\n    legitimacyConfidence: analysis.confidence,\n    isFsbo: analysis.is_fsbo,\n    aiReasoning: analysis.reasoning\n  }\n}];"
+      },
+      "id": "combine-analysis",
+      "name": "Combine Lead + Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-legitimate",
+              "leftValue": "={{ $json.isLegitimate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "confidence-threshold",
+              "leftValue": "={{ $json.legitimacyConfidence }}",
+              "rightValue": 60,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-legitimate",
+      "name": "Filter Legitimate Only",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "filterByFormula": "={Listing URL}='{{ $json.listingUrl }}'"
+      },
+      "id": "check-duplicate",
+      "name": "Check Duplicate by URL",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1780, 200],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-empty",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-not-exists",
+      "name": "If Not Already In DB",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "id"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Address": "={{ $('Combine Lead + Analysis').item.json.address }}",
+            "City": "={{ $('Combine Lead + Analysis').item.json.city }}",
+            "State": "={{ $('Combine Lead + Analysis').item.json.state }}",
+            "Source": "FB Marketplace",
+            "Status": "New",
+            "Asking Price": "={{ $('Combine Lead + Analysis').item.json.askingPrice }}",
+            "Beds": "={{ $('Combine Lead + Analysis').item.json.bedrooms }}",
+            "Baths": "={{ $('Combine Lead + Analysis').item.json.bathrooms }}",
+            "Property Type": "={{ $('Combine Lead + Analysis').item.json.propertyType }}",
+            "Listing URL": "={{ $('Combine Lead + Analysis').item.json.listingUrl }}",
+            "Owner Phone": "={{ $('Combine Lead + Analysis').item.json.ownerPhone }}",
+            "Owner Email": "={{ $('Combine Lead + Analysis').item.json.ownerEmail }}",
+            "Owner Name": "={{ $('Combine Lead + Analysis').item.json.sellerName }}",
+            "Description": "={{ $('Combine Lead + Analysis').item.json.description }}",
+            "Date Found": "={{ $('Combine Lead + Analysis').item.json.dateFound }}",
+            "AI Analysis": "={{ JSON.stringify({ legitimacy: $('Combine Lead + Analysis').item.json.aiReasoning, confidence: $('Combine Lead + Analysis').item.json.legitimacyConfidence }) }}",
+            "Raw Data": "={{ $('Combine Lead + Analysis').item.json.rawData }}"
+          }
+        }
+      },
+      "id": "create-lead",
+      "name": "Create Lead in Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [2220, 100],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-creds",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#leads",
+        "text": "=:shopping_cart: FB Marketplace Lead Found!\n\n*Address:* {{ $('Combine Lead + Analysis').item.json.address }}\n*Price:* ${{ $('Combine Lead + Analysis').item.json.askingPrice ? $('Combine Lead + Analysis').item.json.askingPrice.toLocaleString() : 'N/A' }}\n*Location:* {{ $('Combine Lead + Analysis').item.json.city }}, {{ $('Combine Lead + Analysis').item.json.state }}\n*Source:* Facebook Marketplace (via Apify)\n\n{{ $('Combine Lead + Analysis').item.json.ownerPhone ? ':phone: ' + $('Combine Lead + Analysis').item.json.ownerPhone : '' }}\n\n<{{ $('Combine Lead + Analysis').item.json.listingUrl }}|View on FB>",
+        "otherOptions": {}
+      },
+      "id": "slack-notify",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2440, 100],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-creds",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-op-spam",
+      "name": "Spam/Scam - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1780, 400]
+    },
+    {
+      "parameters": {},
+      "id": "no-op-duplicate",
+      "name": "Duplicate - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2220, 300]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours Trigger": {
+      "main": [
+        [
+          {
+            "node": "Run Apify FB Marketplace Scraper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Apify FB Marketplace Scraper": {
+      "main": [
+        [
+          {
+            "node": "Get Scraper Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Scraper Results": {
+      "main": [
+        [
+          {
+            "node": "Map to Lead Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map to Lead Schema": {
+      "main": [
+        [
+          {
+            "node": "AI Legitimacy Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Legitimacy Check": {
+      "main": [
+        [
+          {
+            "node": "Combine Lead + Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Lead + Analysis": {
+      "main": [
+        [
+          {
+            "node": "Filter Legitimate Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Legitimate Only": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate by URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Spam/Scam - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate by URL": {
+      "main": [
+        [
+          {
+            "node": "If Not Already In DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Not Already In DB": {
+      "main": [
+        [
+          {
+            "node": "Create Lead in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Duplicate - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Lead in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "wholesale-leadgen",
+      "id": "1"
+    },
+    {
+      "name": "engine1-sourcing",
+      "id": "2"
+    },
+    {
+      "name": "apify",
+      "id": "6"
+    }
+  ],
+  "pinData": {},
+  "meta": {
+    "instanceId": "wholesale-leadgen-system"
+  }
+}

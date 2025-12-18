@@ -8,12 +8,106 @@ Complete guide for setting up all API credentials needed for the wholesale lead 
 
 | Service | Purpose | Cost | Priority |
 |---------|---------|------|----------|
+| **Apify** | Web scraping | ~$49/month | Required |
 | Airtable | Database | Free tier | Required |
 | OpenRouter | AI analysis | Pay-as-you-go | Required |
 | Gmail | Email outreach | Free | Required |
 | Twilio | SMS (optional) | ~$0.01/SMS | Optional |
 | Slack | Notifications | Free | Recommended |
 | Skip Tracing | Contact data | ~$0.10/lookup | Required |
+
+---
+
+## 0. Apify Setup (Web Scraping Platform)
+
+Apify handles all the complex web scraping - proxy rotation, anti-bot bypass, and data parsing. This replaces DIY scraping and saves 60+ hours of development.
+
+### Create Account
+
+1. Go to [apify.com](https://apify.com)
+2. Sign up (free tier available for testing)
+3. Choose a plan based on your needs:
+   - **Free**: 5 Actor runs/month (for testing)
+   - **Personal ($49/month)**: 100 Actor runs (good for solo operator)
+   - **Team ($499/month)**: Unlimited (for high volume)
+
+### Get API Token
+
+1. Log in to Apify Console
+2. Go to Settings > Integrations
+3. Find your **Personal API Token**
+4. Copy the token (format: `apify_api_XXXXXXXXXXXXX`)
+
+### n8n Configuration
+
+Create HTTP Header Auth credential:
+- **Credential Type**: Header Auth
+- **Name**: "Apify API Token"
+- **Header Name**: `Authorization`
+- **Header Value**: `Bearer apify_api_XXXXXXXXXXXXX`
+
+### Recommended Actors
+
+These are the pre-built scrapers we use:
+
+| Actor | Purpose | Cost/Run |
+|-------|---------|----------|
+| `apify/zillow-scraper` | Zillow FSBO/listings | ~$0.25-1.00 |
+| `maxcopell/realtor-scraper` | Realtor.com listings | ~$0.25-1.00 |
+| `apify/facebook-marketplace-scraper` | FB Marketplace | ~$0.50-2.00 |
+
+### Actor Configuration Tips
+
+**Zillow Scraper:**
+```json
+{
+  "search": "fsbo",
+  "location": "Austin, TX",
+  "maxItems": 100,
+  "type": "sale"
+}
+```
+
+**Realtor Scraper:**
+```json
+{
+  "location": "Austin, TX",
+  "maxItems": 100,
+  "status": "off_market",
+  "daysOnMarket": { "min": 60, "max": 180 }
+}
+```
+
+**FB Marketplace:**
+```json
+{
+  "searchQuery": "house for sale by owner",
+  "location": "Austin, TX",
+  "maxItems": 50,
+  "category": "propertyrentals"
+}
+```
+
+### Cost Estimation
+
+| Volume | Runs/Month | Apify Cost | Notes |
+|--------|------------|------------|-------|
+| Low | 30 | ~$15 | Testing/learning |
+| Medium | 100 | ~$49 | Solo operator |
+| High | 300+ | ~$100+ | Scaling up |
+
+### Why Apify vs DIY Scraping?
+
+| Aspect | DIY Scraping | Apify |
+|--------|--------------|-------|
+| Setup time | 40-60 hours | 1-2 hours |
+| Maintenance | 2-4 hrs/month | 0 hours |
+| Success rate | 70-85% | 95%+ |
+| Proxy costs | $49+/month | Included |
+| Anti-bot bypass | Manual | Automatic |
+| Data quality | Variable | Consistent |
+
+**Bottom line:** The extra $49/month pays for itself in the first hour of saved time.
 
 ---
 
@@ -356,3 +450,15 @@ Import and run `test-credentials.json` (in workflows folder) to verify all conne
 - Verify address format
 - Some properties have no public records
 - Try alternative skip tracing service
+
+### Apify "Run failed" or "Timeout"
+- Check Actor input parameters match expected format
+- Increase timeout in n8n HTTP Request node (600000ms = 10 min)
+- Verify API token is correct (starts with `apify_api_`)
+- Check Apify Console for detailed error logs
+- Some sites may block during peak hours - try different time
+
+### Apify "Insufficient credits"
+- Add more credits at apify.com/billing
+- Consider upgrading plan for consistent usage
+- Monitor usage in Apify Console dashboard

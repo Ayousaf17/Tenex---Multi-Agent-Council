@@ -1,5 +1,5 @@
 {
-  "name": "Zillow FSBO Scraper (Apify)",
+  "name": "Realtor.com Expired Listings Scraper (Apify)",
   "nodes": [
     {
       "parameters": {
@@ -8,32 +8,33 @@
             {
               "field": "hours",
               "hoursInterval": 24,
-              "triggerAtHour": 8
+              "triggerAtHour": 6
             }
           ]
         }
       },
       "id": "schedule-trigger",
-      "name": "Daily 8 AM Trigger",
+      "name": "Daily 6 AM Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [240, 300]
+      "position": [240, 300],
+      "notes": "Runs early to catch expired listings before other investors"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.apify.com/v2/acts/apify~zillow-scraper/runs?waitForFinish=300",
+        "url": "https://api.apify.com/v2/acts/maxcopell~realtor-scraper/runs?waitForFinish=300",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"search\": \"fsbo\",\n  \"location\": \"{{ $env.TARGET_CITY }}, {{ $env.TARGET_STATE }}\",\n  \"maxItems\": 100,\n  \"type\": \"sale\",\n  \"status\": \"fsbo\"\n}",
+        "jsonBody": "={\n  \"location\": \"{{ $env.TARGET_CITY }}, {{ $env.TARGET_STATE }}\",\n  \"maxItems\": 100,\n  \"status\": \"off_market\",\n  \"daysOnMarket\": {\n    \"min\": 60,\n    \"max\": 180\n  },\n  \"proxy\": {\n    \"useApifyProxy\": true\n  }\n}",
         "options": {
           "timeout": 600000
         }
       },
       "id": "apify-run",
-      "name": "Run Apify Zillow Scraper",
+      "name": "Run Apify Realtor Scraper",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [460, 300],
@@ -43,7 +44,7 @@
           "name": "Apify API Token"
         }
       },
-      "notes": "Apify handles all proxy rotation, anti-bot, and parsing. Returns clean JSON."
+      "notes": "Finds off-market/expired listings. Adjust daysOnMarket filter as needed."
     },
     {
       "parameters": {
@@ -67,7 +68,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Apify returns clean structured data - just map to our schema\nconst results = $input.first().json;\n\n// Handle both array and object responses\nconst items = Array.isArray(results) ? results : [results];\n\nconst leads = items.map(item => ({\n  json: {\n    address: item.address || item.streetAddress || '',\n    city: item.city || '',\n    state: item.state || '',\n    zip: item.zipcode || item.zip || '',\n    askingPrice: item.price || item.listPrice || null,\n    bedrooms: item.bedrooms || item.beds || null,\n    bathrooms: item.bathrooms || item.baths || null,\n    sqft: item.livingArea || item.sqft || null,\n    yearBuilt: item.yearBuilt || null,\n    propertyType: item.homeType || item.propertyType || 'Single Family',\n    description: item.description || '',\n    photos: item.photos || item.images || [],\n    listingUrl: item.url || item.detailUrl || '',\n    source: 'Zillow FSBO',\n    dateFound: new Date().toISOString(),\n    status: 'New',\n    rawData: JSON.stringify(item)\n  }\n})).filter(lead => lead.json.address); // Only keep leads with addresses\n\nreturn leads;"
+        "jsCode": "// Map Realtor.com data to our lead schema\nconst results = $input.first().json;\nconst items = Array.isArray(results) ? results : [results];\n\nconst leads = items.map(item => {\n  // Realtor.com typically returns structured address\n  const address = item.location?.address || {};\n  \n  return {\n    json: {\n      address: address.line || item.address || '',\n      city: address.city || item.city || '',\n      state: address.state_code || address.state || item.state || '',\n      zip: address.postal_code || item.zip || '',\n      askingPrice: item.list_price || item.price || null,\n      bedrooms: item.description?.beds || item.beds || null,\n      bathrooms: item.description?.baths || item.baths || null,\n      sqft: item.description?.sqft || item.sqft || null,\n      yearBuilt: item.description?.year_built || item.yearBuilt || null,\n      propertyType: item.description?.type || item.propertyType || 'Single Family',\n      description: item.description?.text || '',\n      photos: item.photos?.map(p => p.href) || [],\n      listingUrl: item.href || item.url || '',\n      daysOnMarket: item.list_date ? Math.floor((Date.now() - new Date(item.list_date)) / (1000*60*60*24)) : null,\n      lastListPrice: item.last_sold_price || item.list_price || null,\n      source: 'Realtor Expired',\n      dateFound: new Date().toISOString(),\n      status: 'New',\n      rawData: JSON.stringify(item)\n    }\n  };\n}).filter(lead => lead.json.address);\n\nreturn leads;"
       },
       "id": "map-data",
       "name": "Map to Lead Schema",
@@ -151,7 +152,7 @@
             "City": "={{ $('Map to Lead Schema').item.json.city }}",
             "State": "={{ $('Map to Lead Schema').item.json.state }}",
             "ZIP": "={{ $('Map to Lead Schema').item.json.zip }}",
-            "Source": "Zillow FSBO",
+            "Source": "Realtor Expired",
             "Status": "New",
             "Asking Price": "={{ $('Map to Lead Schema').item.json.askingPrice }}",
             "Beds": "={{ $('Map to Lead Schema').item.json.bedrooms }}",
@@ -160,8 +161,10 @@
             "Year Built": "={{ $('Map to Lead Schema').item.json.yearBuilt }}",
             "Property Type": "={{ $('Map to Lead Schema').item.json.propertyType }}",
             "Listing URL": "={{ $('Map to Lead Schema').item.json.listingUrl }}",
+            "Days on Market": "={{ $('Map to Lead Schema').item.json.daysOnMarket }}",
             "Description": "={{ $('Map to Lead Schema').item.json.description }}",
             "Date Found": "={{ $('Map to Lead Schema').item.json.dateFound }}",
+            "Priority": "high",
             "Raw Data": "={{ $('Map to Lead Schema').item.json.rawData }}"
           }
         }
@@ -176,12 +179,13 @@
           "id": "airtable-creds",
           "name": "Airtable API"
         }
-      }
+      },
+      "notes": "Expired listings are HIGH PRIORITY - proven motivated sellers"
     },
     {
       "parameters": {
         "channel": "#leads",
-        "text": "=:house: New FSBO Lead Found!\n\n*Address:* {{ $('Map to Lead Schema').item.json.address }}, {{ $('Map to Lead Schema').item.json.city }}, {{ $('Map to Lead Schema').item.json.state }}\n*Price:* ${{ $('Map to Lead Schema').item.json.askingPrice ? $('Map to Lead Schema').item.json.askingPrice.toLocaleString() : 'N/A' }}\n*Beds/Baths:* {{ $('Map to Lead Schema').item.json.bedrooms || '?' }}/{{ $('Map to Lead Schema').item.json.bathrooms || '?' }}\n*Source:* Zillow FSBO (via Apify)\n\n<{{ $('Map to Lead Schema').item.json.listingUrl }}|View Listing>",
+        "text": "=:rotating_light: EXPIRED LISTING Found!\n\n*Address:* {{ $('Map to Lead Schema').item.json.address }}, {{ $('Map to Lead Schema').item.json.city }}, {{ $('Map to Lead Schema').item.json.state }}\n*Last Price:* ${{ $('Map to Lead Schema').item.json.askingPrice ? $('Map to Lead Schema').item.json.askingPrice.toLocaleString() : 'N/A' }}\n*Days on Market:* {{ $('Map to Lead Schema').item.json.daysOnMarket || 'Unknown' }}\n*Beds/Baths:* {{ $('Map to Lead Schema').item.json.bedrooms || '?' }}/{{ $('Map to Lead Schema').item.json.bathrooms || '?' }}\n*Source:* Realtor.com Expired (via Apify)\n\n:star: *HIGH PRIORITY* - Owner tried to sell, didn't succeed. Very motivated!\n\n<{{ $('Map to Lead Schema').item.json.listingUrl }}|View Property>",
         "otherOptions": {}
       },
       "id": "slack-notify",
@@ -206,18 +210,18 @@
     }
   ],
   "connections": {
-    "Daily 8 AM Trigger": {
+    "Daily 6 AM Trigger": {
       "main": [
         [
           {
-            "node": "Run Apify Zillow Scraper",
+            "node": "Run Apify Realtor Scraper",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Run Apify Zillow Scraper": {
+    "Run Apify Realtor Scraper": {
       "main": [
         [
           {
@@ -307,6 +311,10 @@
     {
       "name": "apify",
       "id": "6"
+    },
+    {
+      "name": "high-priority",
+      "id": "7"
     }
   ],
   "pinData": {},
